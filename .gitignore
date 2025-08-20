@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Data and outputs (keep small jsonl/label files)
+outputs/
+eval_results/
+demo_results/
+data/**/images/
+data/**/parquet/
+!data/**/captions.jsonl
+!data/**/labels.jsonl
+!data/**/label_map.json
+
+# Caches
+.cache/
+huggingface/
+

@@ -1,0 +1,9 @@
+compute_environment: LOCAL_MACHINE
+device_fp16: true
+frac_gpu_memory: 1.0
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+use_cpu: false
+
+distributed_type: NO

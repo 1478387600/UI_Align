@@ -1,0 +1,30 @@
+# Stage-1: RICO+Screen2Words预适配训练配置
+model:
+  name: "google/siglip-base-patch16-224"
+  load_in_4bit: true
+  lora_r: 16
+  lora_alpha: 16
+  freeze_ratio: 0.6
+
+data:
+  train_images: "data/rico_screen2words/images"
+  train_captions: "data/rico_screen2words/captions.jsonl"
+  image_size: 224
+  max_text_length: 64
+
+training:
+  precision: "bf16"
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 16
+  learning_rate: 2e-5
+  weight_decay: 0.05
+  epochs: 5
+  warmup_ratio: 0.03
+  scheduler: "cosine"
+  seed: 42
+
+output:
+  dir: "outputs/stage1"
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 50

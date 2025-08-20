@@ -1,0 +1,295 @@
+"""
+SigLIP双塔模型实现，支持QLoRA量化和LoRA微调
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoProcessor, AutoModel, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
+from bitsandbytes import BitsAndBytesConfig
+import math
+
+
+class SigLipDualEncoder(nn.Module):
+    """SigLIP双塔编码器，支持图像-文本对齐和分类任务"""
+    
+    def __init__(self, 
+                 model_name='google/siglip-base-patch16-224',
+                 load_in_4bit=True,
+                 lora_r=16,
+                 lora_alpha=16,
+                 lora_dropout=0.1,
+                 freeze_ratio=0.6,
+                 num_classes=None,
+                 device_map='auto'):
+        super().__init__()
+        
+        self.model_name = model_name
+        self.num_classes = num_classes
+        
+        # 量化配置
+        if load_in_4bit:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16
+            )
+        else:
+            quantization_config = None
+        
+        # 加载预训练模型
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+            device_map=device_map,
+            trust_remote_code=True
+        )
+        
+        # 获取模型配置
+        self.config = self.model.config
+        
+        # 获取嵌入维度
+        if hasattr(self.config, 'projection_dim'):
+            self.embed_dim = self.config.projection_dim
+        elif hasattr(self.config, 'hidden_size'):
+            self.embed_dim = self.config.hidden_size
+        else:
+            self.embed_dim = 768  # 默认值
+        
+        # 可学习的温度参数
+        self.logit_scale = nn.Parameter(torch.ones([]) * math.log(1 / 0.07))
+        
+        # 冻结部分层
+        self._freeze_layers(freeze_ratio)
+        
+        # 应用LoRA
+        self._apply_lora(lora_r, lora_alpha, lora_dropout)
+        
+        # 分类头（如果需要）
+        if num_classes is not None:
+            self.classifier = ImageClassifierHead(self.embed_dim, num_classes)
+        else:
+            self.classifier = None
+        
+        print(f"Model initialized with embed_dim={self.embed_dim}, num_classes={num_classes}")
+    
+    def _freeze_layers(self, freeze_ratio):
+        """冻结指定比例的层"""
+        if freeze_ratio <= 0:
+            return
+        
+        # 获取所有transformer层
+        if hasattr(self.model, 'vision_model') and hasattr(self.model.vision_model, 'encoder'):
+            vision_layers = self.model.vision_model.encoder.layers
+            text_layers = getattr(self.model.text_model.encoder, 'layers', [])
+        else:
+            # 尝试其他可能的结构
+            vision_layers = []
+            text_layers = []
+        
+        # 冻结vision layers
+        if vision_layers:
+            freeze_count = int(len(vision_layers) * freeze_ratio)
+            for i in range(freeze_count):
+                for param in vision_layers[i].parameters():
+                    param.requires_grad = False
+            print(f"Frozen {freeze_count}/{len(vision_layers)} vision layers")
+        
+        # 冻结text layers  
+        if text_layers:
+            freeze_count = int(len(text_layers) * freeze_ratio)
+            for i in range(freeze_count):
+                for param in text_layers[i].parameters():
+                    param.requires_grad = False
+            print(f"Frozen {freeze_count}/{len(text_layers)} text layers")
+    
+    def _apply_lora(self, lora_r, lora_alpha, lora_dropout):
+        """应用LoRA配置"""
+        # 定义目标模块（根据具体模型结构调整）
+        target_modules = [
+            "q_proj", "k_proj", "v_proj", "out_proj",  # attention层
+            "fc1", "fc2",  # MLP层
+            "visual_projection", "text_projection"  # 投影层
+        ]
+        
+        # 创建LoRA配置
+        lora_config = LoraConfig(
+            task_type=TaskType.FEATURE_EXTRACTION,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=target_modules,
+            bias="none"
+        )
+        
+        # 应用LoRA
+        try:
+            self.model = get_peft_model(self.model, lora_config)
+            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha}")
+        except Exception as e:
+            print(f"Warning: Failed to apply LoRA: {e}")
+            print("Continuing without LoRA...")
+    
+    def forward(self, pixel_values, input_ids=None, attention_mask=None, return_features=False):
+        """
+        前向传播
+        
+        Args:
+            pixel_values: 图像像素值 [batch_size, channels, height, width]
+            input_ids: 文本token ids [batch_size, seq_len] (可选)
+            attention_mask: 文本注意力mask [batch_size, seq_len] (可选)
+            return_features: 是否返回中间特征
+        
+        Returns:
+            如果只有图像输入：
+                - image_embeds: 图像嵌入
+                - cls_logits: 分类logits (如果有分类头)
+            如果有图像和文本输入：
+                - image_embeds: 图像嵌入
+                - text_embeds: 文本嵌入
+                - logit_scale: 温度参数
+                - cls_logits: 分类logits (如果有分类头)
+        """
+        # 构造输入
+        inputs = {'pixel_values': pixel_values}
+        if input_ids is not None:
+            inputs['input_ids'] = input_ids
+        if attention_mask is not None:
+            inputs['attention_mask'] = attention_mask
+        
+        # 模型前向传播
+        outputs = self.model(**inputs, return_dict=True)
+        
+        # 提取嵌入
+        image_embeds = outputs.image_embeds
+        text_embeds = getattr(outputs, 'text_embeds', None)
+        
+        # L2归一化
+        image_embeds = F.normalize(image_embeds, dim=-1)
+        if text_embeds is not None:
+            text_embeds = F.normalize(text_embeds, dim=-1)
+        
+        # 分类logits
+        cls_logits = None
+        if self.classifier is not None:
+            # 使用未归一化的特征进行分类
+            image_features = outputs.image_embeds  # 未归一化的特征
+            cls_logits = self.classifier(image_features)
+        
+        # 返回结果
+        result = {
+            'image_embeds': image_embeds,
+            'logit_scale': self.logit_scale.exp()
+        }
+        
+        if text_embeds is not None:
+            result['text_embeds'] = text_embeds
+        
+        if cls_logits is not None:
+            result['cls_logits'] = cls_logits
+        
+        if return_features:
+            result['raw_image_features'] = outputs.image_embeds
+            if hasattr(outputs, 'text_embeds'):
+                result['raw_text_features'] = outputs.text_embeds
+        
+        return result
+    
+    def encode_image(self, pixel_values):
+        """编码图像"""
+        with torch.no_grad():
+            outputs = self.model(pixel_values=pixel_values, return_dict=True)
+            image_embeds = F.normalize(outputs.image_embeds, dim=-1)
+        return image_embeds
+    
+    def encode_text(self, input_ids, attention_mask):
+        """编码文本"""
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            text_embeds = F.normalize(outputs.text_embeds, dim=-1)
+        return text_embeds
+    
+    def get_trainable_params(self):
+        """获取可训练参数统计"""
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        return {
+            'total_params': total_params,
+            'trainable_params': trainable_params,
+            'trainable_ratio': trainable_params / total_params * 100
+        }
+
+
+class ImageClassifierHead(nn.Module):
+    """图像分类头"""
+    
+    def __init__(self, input_dim, num_classes, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(input_dim, num_classes)
+        
+        # 初始化
+        nn.init.normal_(self.classifier.weight, std=0.02)
+        nn.init.zeros_(self.classifier.bias)
+    
+    def forward(self, x):
+        x = self.dropout(x)
+        return self.classifier(x)
+
+
+def create_model_and_processor(model_name='google/siglip-base-patch16-224', **model_kwargs):
+    """创建模型和处理器的便捷函数"""
+    
+    # 创建处理器
+    processor = AutoProcessor.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    # 创建模型
+    model = SigLipDualEncoder(model_name=model_name, **model_kwargs)
+    
+    return model, processor, tokenizer
+
+
+def load_model_checkpoint(checkpoint_path, model_name='google/siglip-base-patch16-224', **model_kwargs):
+    """从检查点加载模型"""
+    
+    # 创建模型
+    model = SigLipDualEncoder(model_name=model_name, **model_kwargs)
+    
+    # 加载权重
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # 加载状态字典
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    
+    if missing_keys:
+        print(f"Missing keys: {missing_keys}")
+    if unexpected_keys:
+        print(f"Unexpected keys: {unexpected_keys}")
+    
+    print(f"Model loaded from {checkpoint_path}")
+    
+    return model
+
+
+def get_model_info(model):
+    """获取模型信息"""
+    info = model.get_trainable_params()
+    
+    print(f"Model: {model.model_name}")
+    print(f"Total parameters: {info['total_params']:,}")
+    print(f"Trainable parameters: {info['trainable_params']:,}")
+    print(f"Trainable ratio: {info['trainable_ratio']:.2f}%")
+    
+    if model.num_classes:
+        print(f"Number of classes: {model.num_classes}")
+    
+    return info

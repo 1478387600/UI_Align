@@ -1,0 +1,16 @@
+accelerate>=0.30.0
+bitsandbytes>=0.43.0
+datasets>=2.19.0
+pyarrow>=14.0.0
+pandas>=2.0.0
+huggingface_hub
+numpy
+opencv-python
+peft>=0.11.0
+Pillow
+scikit-learn
+torch>=2.1.0
+transformers>=4.41.0
+matplotlib
+wandb
+tqdm

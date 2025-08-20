@@ -1,0 +1,17 @@
+{
+  "mcdonalds_home": 0,
+  "mcdonalds_order": 1,
+  "mcdonalds_cart": 2,
+  "mcdonalds_payment": 3,
+  "mcdonalds_profile": 4,
+  "luckin_home": 5,
+  "luckin_order": 6,
+  "luckin_cart": 7,
+  "luckin_payment": 8,
+  "luckin_profile": 9,
+  "ctrip_home": 10,
+  "ctrip_flight_search": 11,
+  "ctrip_hotel_search": 12,
+  "ctrip_order_detail": 13,
+  "ctrip_profile": 14
+}
