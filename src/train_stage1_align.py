@@ -260,6 +260,49 @@ def main():
             if isinstance(values, dict):
                 for key, value in values.items():
                     setattr(args, key, value)
+
+    # 强制类型纠正：防止 YAML/环境变量将数值读取为字符串
+    def _to_float(x, name):
+        try:
+            return float(x)
+        except Exception:
+            logger.warning(f"Cast to float failed: {name}={x}")
+            return x
+
+    def _to_int(x, name):
+        try:
+            return int(x)
+        except Exception:
+            logger.warning(f"Cast to int failed: {name}={x}")
+            return x
+
+    def _to_bool(x, name):
+        if isinstance(x, bool):
+            return x
+        if isinstance(x, str):
+            return x.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(x)
+
+    # 数值/布尔字段列表
+    for k in ["learning_rate", "weight_decay", "warmup_ratio", "freeze_ratio"]:
+        if hasattr(args, k):
+            setattr(args, k, _to_float(getattr(args, k), k))
+    for k in [
+        "per_device_batch_size",
+        "gradient_accumulation_steps",
+        "epochs",
+        "logging_steps",
+        "save_steps",
+        "eval_steps",
+        "seed",
+        "image_size",
+        "max_text_length",
+    ]:
+        if hasattr(args, k):
+            setattr(args, k, _to_int(getattr(args, k), k))
+    for k in ["load_in_4bit", "use_wandb"]:
+        if hasattr(args, k):
+            setattr(args, k, _to_bool(getattr(args, k), k))
     
     # 初始化accelerator
     accelerator = Accelerator(
