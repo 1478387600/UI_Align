@@ -167,80 +167,41 @@ class SigLipDualEncoder(nn.Module):
     
     def forward(self, pixel_values, input_ids=None, attention_mask=None, return_features=False):
         """
-        前向传播
-        
-        Args:
-            pixel_values: 图像像素值 [batch_size, channels, height, width]
-            input_ids: 文本token ids [batch_size, seq_len] (可选)
-            attention_mask: 文本注意力mask [batch_size, seq_len] (可选)
-            return_features: 是否返回中间特征
-        
-        Returns:
-            如果只有图像输入：
-                - image_embeds: 图像嵌入
-                - cls_logits: 分类logits (如果有分类头)
-            如果有图像和文本输入：
-                - image_embeds: 图像嵌入
-                - text_embeds: 文本嵌入
-                - logit_scale: 温度参数
-                - cls_logits: 分类logits (如果有分类头)
+        前向传播（调用顶层 SigLIP 模型，避免将 text 关键字误传入 vision 子模块）
         """
-        # 构造输入（SigLIP 文本/图像路径需严格分开，避免把 text 的键传入 vision）
-        inputs = {'pixel_values': pixel_values}
-        
-        # 模型前向传播
-        # 先跑 vision 分支
-        vision_outputs = self.model.vision_model(pixel_values=pixel_values, return_dict=True)
-
-        text_embeds = None
+        model_inputs = {"pixel_values": pixel_values}
         if input_ids is not None:
-            text_outputs = self.model.text_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                return_dict=True,
-            )
-            text_embeds = text_outputs.text_embeds if hasattr(text_outputs, 'text_embeds') else getattr(text_outputs, 'pooler_output', None)
+            model_inputs["input_ids"] = input_ids
+        if attention_mask is not None:
+            model_inputs["attention_mask"] = attention_mask
 
-        # 投影到共享空间
-        image_embeds = vision_outputs.image_embeds if hasattr(vision_outputs, 'image_embeds') else getattr(vision_outputs, 'pooler_output')
-        if hasattr(self.model, 'visual_projection'):
-            image_embeds = self.model.visual_projection(image_embeds)
-        if text_embeds is not None and hasattr(self.model, 'text_projection'):
-            text_embeds = self.model.text_projection(text_embeds)
-        
-        # 提取嵌入
-        image_embeds = outputs.image_embeds
-        text_embeds = getattr(outputs, 'text_embeds', None)
-        
-        # L2归一化
-        image_embeds = F.normalize(image_embeds, dim=-1)
-        if text_embeds is not None:
-            text_embeds = F.normalize(text_embeds, dim=-1)
-        
-        # 分类logits
+        outputs = self.model(**model_inputs, return_dict=True)
+
+        # 未归一化特征用于分类
+        image_features = outputs.image_embeds
+        text_features = getattr(outputs, "text_embeds", None)
+
+        # 归一化后的特征用于对齐损失
+        image_embeds = F.normalize(image_features, dim=-1)
+        text_embeds = F.normalize(text_features, dim=-1) if text_features is not None else None
+
         cls_logits = None
         if self.classifier is not None:
-            # 使用未归一化的特征进行分类
-            image_features = outputs.image_embeds  # 未归一化的特征
             cls_logits = self.classifier(image_features)
-        
-        # 返回结果
+
         result = {
-            'image_embeds': image_embeds,
-            'logit_scale': self.logit_scale.exp()
+            "image_embeds": image_embeds,
+            "logit_scale": self.logit_scale.exp(),
         }
-        
         if text_embeds is not None:
-            result['text_embeds'] = text_embeds
-        
+            result["text_embeds"] = text_embeds
         if cls_logits is not None:
-            result['cls_logits'] = cls_logits
-        
+            result["cls_logits"] = cls_logits
         if return_features:
-            result['raw_image_features'] = outputs.image_embeds
-            if hasattr(outputs, 'text_embeds'):
-                result['raw_text_features'] = outputs.text_embeds
-        
+            result["raw_image_features"] = image_features
+            if text_features is not None:
+                result["raw_text_features"] = text_features
+
         return result
     
     def encode_image(self, pixel_values):
