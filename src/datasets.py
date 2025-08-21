@@ -58,7 +58,7 @@ class PairCaptionDataset(Dataset):
         # 图像预处理
         pixel_values = self.image_processor(images=img, return_tensors='pt')['pixel_values'][0]
         
-        # 文本预处理
+        # 文本预处理（兼容无 attention_mask 的分词器）
         text_inputs = self.tokenizer(
             item['caption'], 
             max_length=self.max_len, 
@@ -66,11 +66,18 @@ class PairCaptionDataset(Dataset):
             padding='max_length', 
             return_tensors='pt'
         )
+
+        input_ids = text_inputs['input_ids'][0]
+        # 有些 SigLIP/CLIP 系列分词器不会返回 attention_mask，这里做兜底
+        if 'attention_mask' in text_inputs:
+            attention_mask = text_inputs['attention_mask'][0]
+        else:
+            attention_mask = torch.ones_like(input_ids)
         
         return {
             'pixel_values': pixel_values,
-            'input_ids': text_inputs['input_ids'][0],
-            'attention_mask': text_inputs['attention_mask'][0],
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'image_name': item['image'],
             'caption': item['caption']
         }
