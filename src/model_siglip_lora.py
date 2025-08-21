@@ -290,10 +290,11 @@ def create_model_and_processor(model_name='google/siglip-base-patch16-224', **mo
     """创建模型和处理器的便捷函数"""
     
     # 创建处理器
+    # 优先尝试 fast 版；如因缺少 torchvision 或其他后端导致 ImportError，则回退为非 fast 版
     try:
         processor = AutoProcessor.from_pretrained(model_name, use_fast=True)
-    except TypeError:
-        processor = AutoProcessor.from_pretrained(model_name)
+    except (TypeError, ImportError, Exception):
+        processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     except TypeError:
