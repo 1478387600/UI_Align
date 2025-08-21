@@ -3,6 +3,7 @@ Stage-1训练脚本：RICO+Screen2Words预适配训练
 仅进行图像-文本对齐训练，使用对比学习损失
 """
 import os
+import sys
 import json
 import argparse
 import yaml
@@ -252,13 +253,21 @@ def save_checkpoint(model, optimizer, scheduler, epoch, step, output_dir, accele
 def main():
     args = parse_args()
     
-    # 加载配置文件
+    # 加载配置文件（CLI 优先于配置文件）
     if args.config:
         config = load_config(args.config)
-        # 更新args
+        # 收集 CLI 显式提供的键（--key 或 --key=value）
+        cli_keys = set()
+        for tok in sys.argv[1:]:
+            if tok.startswith("--"):
+                k = tok[2:].split("=")[0]
+                cli_keys.add(k)
+        # 更新 args：仅对未在 CLI 指定的键应用配置
         for section, values in config.items():
             if isinstance(values, dict):
                 for key, value in values.items():
+                    if key in cli_keys:
+                        continue
                     setattr(args, key, value)
 
     # 强制类型纠正：防止 YAML/环境变量将数值读取为字符串
@@ -297,6 +306,8 @@ def main():
         "seed",
         "image_size",
         "max_text_length",
+        "lora_r",
+        "lora_alpha",
     ]:
         if hasattr(args, k):
             setattr(args, k, _to_int(getattr(args, k), k))

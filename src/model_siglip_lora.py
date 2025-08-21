@@ -167,24 +167,44 @@ class SigLipDualEncoder(nn.Module):
     
     def forward(self, pixel_values, input_ids=None, attention_mask=None, return_features=False):
         """
-        前向传播（调用顶层 SigLIP 模型，避免将 text 关键字误传入 vision 子模块）
+        前向传播：分别调用 vision/text 子模块，彻底避免将 text 关键字传入 vision。
         """
-        model_inputs = {"pixel_values": pixel_values}
+        # Vision branch
+        vision_outputs = self.model.vision_model(
+            pixel_values=pixel_values,
+            return_dict=True,
+        )
+
+        image_hidden = getattr(vision_outputs, "pooler_output", None)
+        if image_hidden is None and hasattr(vision_outputs, "last_hidden_state"):
+            last = vision_outputs.last_hidden_state
+            image_hidden = last.mean(dim=1)
+        if hasattr(self.model, "visual_projection"):
+            image_features = self.model.visual_projection(image_hidden)
+        else:
+            image_features = image_hidden
+
+        # Text branch (optional)
+        text_features = None
         if input_ids is not None:
-            model_inputs["input_ids"] = input_ids
-        if attention_mask is not None:
-            model_inputs["attention_mask"] = attention_mask
+            text_outputs = self.model.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            text_hidden = getattr(text_outputs, "pooler_output", None)
+            if text_hidden is None and hasattr(text_outputs, "last_hidden_state"):
+                text_hidden = text_outputs.last_hidden_state[:, 0]
+            if hasattr(self.model, "text_projection"):
+                text_features = self.model.text_projection(text_hidden)
+            else:
+                text_features = text_hidden
 
-        outputs = self.model(**model_inputs, return_dict=True)
-
-        # 未归一化特征用于分类
-        image_features = outputs.image_embeds
-        text_features = getattr(outputs, "text_embeds", None)
-
-        # 归一化后的特征用于对齐损失
+        # Normalize for contrastive loss
         image_embeds = F.normalize(image_features, dim=-1)
         text_embeds = F.normalize(text_features, dim=-1) if text_features is not None else None
 
+        # Classification on unnormalized projected image features
         cls_logits = None
         if self.classifier is not None:
             cls_logits = self.classifier(image_features)
@@ -207,16 +227,35 @@ class SigLipDualEncoder(nn.Module):
     def encode_image(self, pixel_values):
         """编码图像"""
         with torch.no_grad():
-            outputs = self.model(pixel_values=pixel_values, return_dict=True)
-            image_embeds = F.normalize(outputs.image_embeds, dim=-1)
-        return image_embeds
+            vision_outputs = self.model.vision_model(pixel_values=pixel_values, return_dict=True)
+            image_hidden = getattr(vision_outputs, "pooler_output", None)
+            if image_hidden is None and hasattr(vision_outputs, "last_hidden_state"):
+                last = vision_outputs.last_hidden_state
+                image_hidden = last.mean(dim=1)
+            if hasattr(self.model, "visual_projection"):
+                image_features = self.model.visual_projection(image_hidden)
+            else:
+                image_features = image_hidden
+            image_embeds = F.normalize(image_features, dim=-1)
+            return image_embeds
     
     def encode_text(self, input_ids, attention_mask):
         """编码文本"""
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-            text_embeds = F.normalize(outputs.text_embeds, dim=-1)
-        return text_embeds
+            text_outputs = self.model.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            text_hidden = getattr(text_outputs, "pooler_output", None)
+            if text_hidden is None and hasattr(text_outputs, "last_hidden_state"):
+                text_hidden = text_outputs.last_hidden_state[:, 0]
+            if hasattr(self.model, "text_projection"):
+                text_features = self.model.text_projection(text_hidden)
+            else:
+                text_features = text_hidden
+            text_embeds = F.normalize(text_features, dim=-1)
+            return text_embeds
     
     def get_trainable_params(self):
         """获取可训练参数统计"""
