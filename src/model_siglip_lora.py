@@ -185,15 +185,28 @@ class SigLipDualEncoder(nn.Module):
                 - logit_scale: 温度参数
                 - cls_logits: 分类logits (如果有分类头)
         """
-        # 构造输入（SigLIP 不接受 inputs_embeds，仅接受 input_ids/attention_mask）
+        # 构造输入（SigLIP 文本/图像路径需严格分开，避免把 text 的键传入 vision）
         inputs = {'pixel_values': pixel_values}
-        if input_ids is not None:
-            inputs['input_ids'] = input_ids
-        if attention_mask is not None:
-            inputs['attention_mask'] = attention_mask
         
         # 模型前向传播
-        outputs = self.model(**inputs, return_dict=True)
+        # 先跑 vision 分支
+        vision_outputs = self.model.vision_model(pixel_values=pixel_values, return_dict=True)
+
+        text_embeds = None
+        if input_ids is not None:
+            text_outputs = self.model.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            text_embeds = text_outputs.text_embeds if hasattr(text_outputs, 'text_embeds') else getattr(text_outputs, 'pooler_output', None)
+
+        # 投影到共享空间
+        image_embeds = vision_outputs.image_embeds if hasattr(vision_outputs, 'image_embeds') else getattr(vision_outputs, 'pooler_output')
+        if hasattr(self.model, 'visual_projection'):
+            image_embeds = self.model.visual_projection(image_embeds)
+        if text_embeds is not None and hasattr(self.model, 'text_projection'):
+            text_embeds = self.model.text_projection(text_embeds)
         
         # 提取嵌入
         image_embeds = outputs.image_embeds
@@ -277,8 +290,14 @@ def create_model_and_processor(model_name='google/siglip-base-patch16-224', **mo
     """创建模型和处理器的便捷函数"""
     
     # 创建处理器
-    processor = AutoProcessor.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    try:
+        processor = AutoProcessor.from_pretrained(model_name, use_fast=True)
+    except TypeError:
+        processor = AutoProcessor.from_pretrained(model_name)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    except TypeError:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     # 创建模型
     model = SigLipDualEncoder(model_name=model_name, **model_kwargs)
