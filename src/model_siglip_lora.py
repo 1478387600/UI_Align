@@ -131,15 +131,20 @@ class SigLipDualEncoder(nn.Module):
             print("[Info] LoRA disabled (r<=0)")
             return
 
-        # 收集 vision 子网中可注入的线性层名称（限定到 vision_model 或 visual_projection）
-        vision_suffixes = ("q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "visual_projection")
-        vision_targets = []
-        for name, module in self.model.named_modules():
-            if ("vision_model" in name or name.endswith("visual_projection")) and any(name.endswith(sfx) for sfx in vision_suffixes):
-                vision_targets.append(name)
+        # 仅对 vision_model 子模块注入 LoRA，避免影响 text 塔 forward（导致 inputs_embeds 路径）
+        vm = getattr(self.model, "vision_model", None)
+        if vm is None:
+            print("[Warn] vision_model not found on base model; skip LoRA")
+            return
 
-        if not vision_targets:
-            print("[Warn] No vision modules found for LoRA injection; skipping LoRA")
+        vision_suffixes = ("q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2")
+        inner_targets = []
+        for name, _ in vm.named_modules():
+            if any(name.endswith(sfx) for sfx in vision_suffixes):
+                inner_targets.append(name)
+
+        if not inner_targets:
+            print("[Warn] No vision modules found for LoRA injection in vision_model; skipping LoRA")
             return
 
         # 创建LoRA配置（目标为精确模块名列表）
@@ -148,15 +153,16 @@ class SigLipDualEncoder(nn.Module):
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=vision_targets,
+            target_modules=inner_targets,
             bias="none",
         )
 
         try:
-            self.model = get_peft_model(self.model, lora_config)
-            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha} on {len(vision_targets)} vision modules")
+            vm_lora = get_peft_model(vm, lora_config)
+            self.model.vision_model = vm_lora
+            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha} on {len(inner_targets)} vision modules (vision_model)")
         except Exception as e:
-            print(f"Warning: Failed to apply LoRA on vision modules: {e}")
+            print(f"Warning: Failed to apply LoRA on vision_model: {e}")
             print("Continuing without LoRA...")
     
     def forward(self, pixel_values, input_ids=None, attention_mask=None, return_features=False):
