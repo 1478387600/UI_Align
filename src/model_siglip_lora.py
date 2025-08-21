@@ -126,30 +126,37 @@ class SigLipDualEncoder(nn.Module):
             print(f"Frozen {freeze_count}/{len(text_layers)} text layers")
     
     def _apply_lora(self, lora_r, lora_alpha, lora_dropout):
-        """应用LoRA配置"""
-        # 定义目标模块（根据具体模型结构调整）
-        target_modules = [
-            "q_proj", "k_proj", "v_proj", "out_proj",  # attention层
-            "fc1", "fc2",  # MLP层
-            "visual_projection", "text_projection"  # 投影层
-        ]
-        
-        # 创建LoRA配置
+        """应用LoRA配置，仅对 vision 分支与视觉投影层注入，避免 text 分支触发 inputs_embeds 路径。"""
+        if lora_r is None or lora_r <= 0:
+            print("[Info] LoRA disabled (r<=0)")
+            return
+
+        # 收集 vision 子网中可注入的线性层名称（限定到 vision_model 或 visual_projection）
+        vision_suffixes = ("q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "visual_projection")
+        vision_targets = []
+        for name, module in self.model.named_modules():
+            if ("vision_model" in name or name.endswith("visual_projection")) and any(name.endswith(sfx) for sfx in vision_suffixes):
+                vision_targets.append(name)
+
+        if not vision_targets:
+            print("[Warn] No vision modules found for LoRA injection; skipping LoRA")
+            return
+
+        # 创建LoRA配置（目标为精确模块名列表）
         lora_config = LoraConfig(
             task_type=TaskType.FEATURE_EXTRACTION,
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=target_modules,
-            bias="none"
+            target_modules=vision_targets,
+            bias="none",
         )
-        
-        # 应用LoRA
+
         try:
             self.model = get_peft_model(self.model, lora_config)
-            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha}")
+            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha} on {len(vision_targets)} vision modules")
         except Exception as e:
-            print(f"Warning: Failed to apply LoRA: {e}")
+            print(f"Warning: Failed to apply LoRA on vision modules: {e}")
             print("Continuing without LoRA...")
     
     def forward(self, pixel_values, input_ids=None, attention_mask=None, return_features=False):
@@ -172,7 +179,7 @@ class SigLipDualEncoder(nn.Module):
                 - logit_scale: 温度参数
                 - cls_logits: 分类logits (如果有分类头)
         """
-        # 构造输入
+        # 构造输入（SigLIP 不接受 inputs_embeds，仅接受 input_ids/attention_mask）
         inputs = {'pixel_values': pixel_values}
         if input_ids is not None:
             inputs['input_ids'] = input_ids
