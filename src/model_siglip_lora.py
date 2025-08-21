@@ -159,8 +159,36 @@ class SigLipDualEncoder(nn.Module):
 
         try:
             vm_lora = get_peft_model(vm, lora_config)
-            self.model.vision_model = vm_lora
-            print(f"Applied LoRA with r={lora_r}, alpha={lora_alpha} on {len(inner_targets)} vision modules (vision_model)")
+
+            # 为避免 PeftModel.forward 注入与顶层模型同名关键字（如 input_ids），这里安装一个前向过滤器，
+            # 直接调用 base_model.forward，只保留 vision 可接受的关键字。
+            class _VisionForwardBypass(nn.Module):
+                def __init__(self, peft_vm):
+                    super().__init__()
+                    self.peft_vm = peft_vm
+                    # 便于外部访问配置
+                    if hasattr(peft_vm, "base_model") and hasattr(peft_vm.base_model, "config"):
+                        self.config = peft_vm.base_model.config
+
+                def forward(self, pixel_values=None, return_dict=True, **kwargs):
+                    allowed_kwargs = {}
+                    if pixel_values is not None:
+                        allowed_kwargs["pixel_values"] = pixel_values
+                    # 透传可选调试开关
+                    if "output_attentions" in kwargs:
+                        allowed_kwargs["output_attentions"] = kwargs["output_attentions"]
+                    if "output_hidden_states" in kwargs:
+                        allowed_kwargs["output_hidden_states"] = kwargs["output_hidden_states"]
+                    if return_dict is not None:
+                        allowed_kwargs["return_dict"] = return_dict
+                    # 直接调用 base_model（LoRA 模块已注入到 base_model 的各层）
+                    return self.peft_vm.base_model(**allowed_kwargs)
+
+            self.model.vision_model = _VisionForwardBypass(vm_lora)
+            print(
+                f"Applied LoRA with r={lora_r}, alpha={lora_alpha} on {len(inner_targets)} vision modules (vision_model)"
+                f"; installed vision forward filter"
+            )
         except Exception as e:
             print(f"Warning: Failed to apply LoRA on vision_model: {e}")
             print("Continuing without LoRA...")
