@@ -6,7 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoProcessor, AutoModel, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
-from bitsandbytes import BitsAndBytesConfig
+# 兼容服务器上 bitsandbytes 不可用/无 GPU 的场景
+try:
+    from bitsandbytes import BitsAndBytesConfig  # type: ignore
+except Exception:  # noqa: BLE001
+    BitsAndBytesConfig = None  # 动态回退：禁用4bit量化
 import math
 
 
@@ -27,24 +31,40 @@ class SigLipDualEncoder(nn.Module):
         self.model_name = model_name
         self.num_classes = num_classes
         
-        # 量化配置
-        if load_in_4bit:
+        # 设备与精度选择（bf16 优先，其次 fp16；CPU 用 fp32）
+        def _choose_dtype() -> torch.dtype:
+            if torch.cuda.is_available():
+                try:
+                    major_cc = torch.cuda.get_device_capability(0)[0]
+                    return torch.bfloat16 if major_cc >= 8 else torch.float16  # Ampere(8.x) 及以上优先 bf16
+                except Exception:  # noqa: BLE001
+                    return torch.float16
+            return torch.float32
+
+        torch_dtype = _choose_dtype()
+
+        # 量化配置（在 GPU 且 bnb 可用时才启用）
+        bnb_available = (BitsAndBytesConfig is not None) and torch.cuda.is_available()
+        if load_in_4bit and bnb_available:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type='nf4',
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.bfloat16
+                bnb_4bit_compute_dtype=torch_dtype,
             )
         else:
+            if load_in_4bit and not bnb_available:
+                print("[Warn] bitsandbytes 不可用或未检测到GPU，已回退为非量化加载（float16/bfloat16/float32）")
             quantization_config = None
         
         # 加载预训练模型
+        resolved_device_map = device_map if torch.cuda.is_available() else None
         self.model = AutoModel.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch_dtype,
             quantization_config=quantization_config,
-            device_map=device_map,
-            trust_remote_code=True
+            device_map=resolved_device_map,
+            trust_remote_code=True,
         )
         
         # 获取模型配置
