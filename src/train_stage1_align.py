@@ -22,7 +22,7 @@ import numpy as np
 # 导入自定义模块
 from datasets import PairCaptionDataset
 from model_siglip_lora import create_model_and_processor, get_model_info
-from losses import contrastive_loss, compute_retrieval_metrics
+from losses import contrastive_loss, compute_retrieval_metrics, compute_retrieval_metrics_full
 
 
 logger = get_logger(__name__)
@@ -278,7 +278,25 @@ def _maybe_eval(model, args, processor, tokenizer, accelerator):
         drop_last=False,
     )
     eval_loader = accelerator.prepare(eval_loader)
-    metrics = evaluate_model(model, eval_loader, accelerator)
+    # 先拿到基本嵌入，再计算完整指标
+    metrics_basic = evaluate_model(model, eval_loader, accelerator)
+    if accelerator.is_local_main_process and metrics_basic:
+        # 复用 evaluate_model 中的聚合逻辑：这里需重新前向以得到 embeddings
+        # 为避免重复计算，简单再跑一遍（采样集较小影响可接受）
+        all_image_embeds = []
+        all_text_embeds = []
+        model.eval()
+        with torch.no_grad():
+            for batch in eval_loader:
+                outs = model(batch['pixel_values'], batch['input_ids'], batch['attention_mask'])
+                all_image_embeds.append(outs['image_embeds'].cpu())
+                all_text_embeds.append(outs['text_embeds'].cpu())
+        img = torch.cat(all_image_embeds, dim=0)
+        txt = torch.cat(all_text_embeds, dim=0)
+        metrics_full = compute_retrieval_metrics_full(img, txt, k_values=(1,5,10))
+        metrics_basic.update(metrics_full)
+        return metrics_basic
+    return metrics_basic
     return metrics
 
 

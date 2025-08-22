@@ -221,3 +221,100 @@ def compute_retrieval_metrics(img_embeds, text_embeds, k_values=(1, 5, 10)):
         metrics[f'avg_recall@{k}'] = avg_recall
     
     return metrics
+
+
+def _ranks_from_similarity(similarity: torch.Tensor):
+    """给定相似度矩阵 S[N,N]，返回：
+    - i2t_ranks: 每个图像查询对应其正样本文本的排名(1-based)
+    - t2i_ranks: 每个文本查询对应其正样本图像的排名(1-based)
+    """
+    N = similarity.size(0)
+    ground_truth = torch.arange(N, device=similarity.device)
+
+    # Image-to-Text ranks
+    _, i2t_sorted_idx = similarity.sort(dim=1, descending=True)
+    i2t_positions = (i2t_sorted_idx == ground_truth.unsqueeze(1)).nonzero()[:, 1]
+    i2t_ranks = i2t_positions + 1  # 1-based
+
+    # Text-to-Image ranks
+    _, t2i_sorted_idx = similarity.t().sort(dim=1, descending=True)
+    t2i_positions = (t2i_sorted_idx == ground_truth.unsqueeze(1)).nonzero()[:, 1]
+    t2i_ranks = t2i_positions + 1  # 1-based
+
+    return i2t_ranks, t2i_ranks
+
+
+def compute_retrieval_metrics_full(img_embeds, text_embeds, k_values=(1, 5, 10)):
+    """
+    完整检索指标：Recall@K、Precision@K、mAP@K、NDCG@K、MRR、Mean/Median Rank、
+    以及正样本/负样本相似度统计（基于已归一化的嵌入）。
+    """
+    img_embeds = F.normalize(img_embeds, dim=-1)
+    text_embeds = F.normalize(text_embeds, dim=-1)
+
+    similarity = img_embeds @ text_embeds.t()  # [N,N]
+    N = similarity.size(0)
+    device = similarity.device
+
+    # Ranks
+    i2t_ranks, t2i_ranks = _ranks_from_similarity(similarity)
+
+    metrics = {}
+
+    # MRR
+    metrics['i2t_mrr'] = (1.0 / i2t_ranks.float()).mean().item()
+    metrics['t2i_mrr'] = (1.0 / t2i_ranks.float()).mean().item()
+    metrics['avg_mrr'] = (metrics['i2t_mrr'] + metrics['t2i_mrr']) / 2
+
+    # Mean/Median rank
+    metrics['i2t_mean_rank'] = i2t_ranks.float().mean().item()
+    metrics['t2i_mean_rank'] = t2i_ranks.float().mean().item()
+    metrics['i2t_median_rank'] = i2t_ranks.median().item()
+    metrics['t2i_median_rank'] = t2i_ranks.median().item()
+
+    # Recall@K, Precision@K, mAP@K, NDCG@K（单一正样本情形的简化）
+    for k in k_values:
+        # Recall@K（单一正样本即命中率）
+        i2t_recall_k = (i2t_ranks <= k).float().mean().item() * 100
+        t2i_recall_k = (t2i_ranks <= k).float().mean().item() * 100
+        metrics[f'i2t_recall@{k}'] = i2t_recall_k
+        metrics[f't2i_recall@{k}'] = t2i_recall_k
+        metrics[f'avg_recall@{k}'] = (i2t_recall_k + t2i_recall_k) / 2
+
+        # Precision@K（单一相关项：命中则 1/K，否则 0）
+        i2t_prec_k = (i2t_ranks <= k).float().mean().item() * (1.0 / k)
+        t2i_prec_k = (t2i_ranks <= k).float().mean().item() * (1.0 / k)
+        metrics[f'i2t_precision@{k}'] = i2t_prec_k
+        metrics[f't2i_precision@{k}'] = t2i_prec_k
+        metrics[f'avg_precision@{k}'] = (i2t_prec_k + t2i_prec_k) / 2
+
+        # AP@K（单一相关项：命中则 1/rank 且 rank<=K，否则 0）
+        i2t_ap_k = torch.where(i2t_ranks <= k, 1.0 / i2t_ranks.float(), torch.zeros_like(i2t_ranks, dtype=torch.float)).mean().item()
+        t2i_ap_k = torch.where(t2i_ranks <= k, 1.0 / t2i_ranks.float(), torch.zeros_like(t2i_ranks, dtype=torch.float)).mean().item()
+        metrics[f'i2t_map@{k}'] = i2t_ap_k
+        metrics[f't2i_map@{k}'] = t2i_ap_k
+        metrics[f'avg_map@{k}'] = (i2t_ap_k + t2i_ap_k) / 2
+
+        # NDCG@K（单一相关项：命中则 1/log2(1+rank)，否则 0；IDCG=1）
+        def _ndcg(ranks):
+            ranks_f = ranks.float()
+            hits = (ranks_f <= k).float()
+            gains = hits / torch.log2(ranks_f + 1)
+            return gains.mean().item()
+
+        i2t_ndcg_k = _ndcg(i2t_ranks)
+        t2i_ndcg_k = _ndcg(t2i_ranks)
+        metrics[f'i2t_ndcg@{k}'] = i2t_ndcg_k
+        metrics[f't2i_ndcg@{k}'] = t2i_ndcg_k
+        metrics[f'avg_ndcg@{k}'] = (i2t_ndcg_k + t2i_ndcg_k) / 2
+
+    # 相似度统计（对角线为正样本；非对角线视为负样本的近似）
+    pos_sim = similarity.diag()
+    neg_mask = ~torch.eye(N, dtype=torch.bool, device=device)
+    neg_sim = similarity[neg_mask]
+    metrics['pos_sim_mean'] = pos_sim.mean().item()
+    metrics['pos_sim_std'] = pos_sim.std(unbiased=False).item()
+    metrics['neg_sim_mean'] = neg_sim.mean().item()
+    metrics['neg_sim_std'] = neg_sim.std(unbiased=False).item()
+
+    return metrics
