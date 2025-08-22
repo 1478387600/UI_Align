@@ -123,8 +123,9 @@ def create_dataloader(args, processor, tokenizer, accelerator):
         drop_last=True
     )
     
+    effective_bs = args.per_device_batch_size * max(1, args.gradient_accumulation_steps)
     logger.info(f"Created dataloader with {len(train_dataset)} samples")
-    logger.info(f"Batch size: {args.per_device_batch_size}, Steps per epoch: {len(train_loader)}")
+    logger.info(f"per_device_batch_size={args.per_device_batch_size}, grad_acc_steps={args.gradient_accumulation_steps}, effective_batch~={effective_bs}, steps/epoch={len(train_loader)}")
     
     return train_loader
 
@@ -250,6 +251,35 @@ def save_checkpoint(model, optimizer, scheduler, epoch, step, output_dir, accele
             json.dump(config, f, indent=2)
         
         logger.info(f"Checkpoint saved to {save_dir}")
+
+
+def _maybe_eval(model, args, processor, tokenizer, accelerator):
+    if not hasattr(args, 'eval_enabled') or not args.eval_enabled:
+        return {}
+    # 构造一个较小的评估 DataLoader（从训练同源数据采样）
+    dataset = PairCaptionDataset(
+        root=args.train_images,
+        jsonl=args.train_captions,
+        image_processor=processor,
+        tokenizer=tokenizer,
+        max_len=args.max_text_length,
+    )
+    # 采样 eval_sample_size
+    N = len(dataset)
+    k = min(getattr(args, 'eval_sample_size', 2000), N)
+    indices = torch.randperm(N)[:k].tolist()
+    subset = torch.utils.data.Subset(dataset, indices)
+    eval_loader = DataLoader(
+        subset,
+        batch_size=getattr(args, 'eval_batch_size', args.per_device_batch_size),
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    eval_loader = accelerator.prepare(eval_loader)
+    metrics = evaluate_model(model, eval_loader, accelerator)
+    return metrics
 
 
 def main():
@@ -396,6 +426,15 @@ def main():
                                  accelerator, epoch, args)
         
         logger.info(f"Epoch {epoch+1} - Average loss: {avg_loss:.4f}")
+
+        # 可选评估（Recall@K）
+        metrics = _maybe_eval(model, args, processor, tokenizer, accelerator)
+        if metrics and accelerator.is_local_main_process:
+            logger.info(f"Eval metrics (sampled): {metrics}")
+            if args.use_wandb:
+                wandb.log({f'eval/{k}': v for k, v in metrics.items()})
+            # 维护 best_recall@5
+            best_recall = max(best_recall, metrics.get('avg_recall@5', 0.0))
         
         # 保存检查点
         if (epoch + 1) % 1 == 0:  # 每个epoch保存一次

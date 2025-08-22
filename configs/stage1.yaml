@@ -22,6 +22,9 @@ training:
   warmup_ratio: 0.03
   scheduler: "cosine"
   seed: 42
+  eval_enabled: true
+  eval_sample_size: 2000
+  eval_batch_size: 64
 
 output:
   dir: "outputs/stage1"
