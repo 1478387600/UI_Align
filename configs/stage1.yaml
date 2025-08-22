@@ -4,7 +4,7 @@ model:
   load_in_4bit: true
   lora_r: 16
   lora_alpha: 16
-  freeze_ratio: 0.6
+  freeze_ratio: 1.0
 
 data:
   train_images: "data/rico_screen2words/images"
@@ -14,8 +14,8 @@ data:
 
 training:
   precision: "bf16"
-  per_device_batch_size: 16
-  gradient_accumulation_steps: 16
+  per_device_batch_size: 64
+  gradient_accumulation_steps: 4
   learning_rate: 2e-5
   weight_decay: 0.05
   epochs: 5

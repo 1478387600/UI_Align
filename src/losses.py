@@ -29,11 +29,8 @@ def contrastive_loss(img_embeds, text_embeds, logit_scale, temperature=None):
     if temperature is not None:
         scale = 1.0 / temperature
     else:
-        # 避免温度过大引发数值不稳定（参考 CLIP 做法，限制到 <=100）
-        if torch.is_tensor(logit_scale):
-            scale = torch.clamp(logit_scale, max=100.0)
-        else:
-            scale = min(float(logit_scale), 100.0)
+        # 使用可学习的对数温度：exp(logit_scale)，并对 exp 后的尺度做上限裁剪（<=100）
+        scale = torch.clamp(torch.exp(logit_scale), max=100.0)
     
     logits_per_image = scale * img_embeds @ text_embeds.t()
     logits_per_text = logits_per_image.t()

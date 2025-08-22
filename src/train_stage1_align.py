@@ -72,6 +72,8 @@ def parse_args():
                         help="预热比例")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子")
+    parser.add_argument("--num_workers", type=int, default=8,
+                        help="DataLoader worker 数")
     
     # 日志参数
     parser.add_argument("--logging_steps", type=int, default=50,
@@ -116,7 +118,7 @@ def create_dataloader(args, processor, tokenizer, accelerator):
         train_dataset,
         batch_size=args.per_device_batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True
     )
@@ -315,6 +317,12 @@ def main():
         if hasattr(args, k):
             setattr(args, k, _to_bool(getattr(args, k), k))
     
+    # matmul 精度优化（加速 bfloat16/fp16）
+    try:
+        torch.set_float32_matmul_precision('high')
+    except Exception:
+        pass
+
     # 初始化accelerator
     accelerator = Accelerator(
         mixed_precision=args.precision,
